@@ -5,6 +5,7 @@ from typing import Literal
 import matplotlib.pyplot as plt
 from ipywidgets import interact, Dropdown, Output, Checkbox, HBox, VBox, Label
 from IPython.display import display
+from tqdm.auto import tqdm  # Added import
 
 class BaseEBM:
     def __init__(
@@ -99,7 +100,8 @@ class EBMRegressor(BaseEBM):
 
         self._initialize_feature_graphs(X, sample_weight)
 
-        for _ in range(self.n_cycles):
+        # Added tqdm progress bar
+        for _ in tqdm(range(self.n_cycles), desc="EBM round-robin cycles"):
             for feature_idx in range(X.shape[1]):
                 X_feature = X[:, feature_idx].reshape(-1, 1)
                 tree = DecisionTreeRegressor(max_depth=self.max_depth)
@@ -175,7 +177,8 @@ class EBMClassifier(BaseEBM):
 
         self._initialize_feature_graphs(X, sample_weight)
 
-        for _ in range(self.n_cycles):
+        # Added tqdm progress bar
+        for _ in tqdm(range(self.n_cycles), desc="EBM round-robin cycles"):
             for feature_idx in range(X.shape[1]):
                 X_feature = X[:, feature_idx].reshape(-1, 1)
                 tree = DecisionTreeRegressor(max_depth=self.max_depth)
