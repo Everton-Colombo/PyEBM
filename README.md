@@ -1,1 +1,1 @@
-# PyEBM
+# EBM works
