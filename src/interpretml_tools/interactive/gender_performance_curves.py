@@ -14,6 +14,23 @@ from IPython.display import display, clear_output
 from tqdm import tqdm
 import mplcursors
 
+from dataclasses import dataclass
+
+@dataclass
+class ModelPlotGroup:
+    id: str
+    label: str
+    scatter: plt.scatter
+    model_type: Literal["baseline", "tocombine", "combined"]
+    instances_data: list[dict]
+    # [
+    #     {
+    #         "model": EBMModel,
+    #         "weights": list[float],
+    #         "metrics": dict
+    #     }
+    # ]
+
 class GenericGroupPerformanceAnalyzer:
     def __init__(self, models_to_combine: List[tuple[str, EBMModel]],
                  baseline_models: List[tuple[str, EBMModel]],
@@ -44,16 +61,17 @@ class GenericGroupPerformanceAnalyzer:
         
         self.fig = None
         self.ax = None
-        self.scatter_plots = {}  # Dictionary to store scatter plots by group
         self.info_output = widgets.Output()
-        self.metrics_data = []
-        self.combination_groups = []
-        self.group_data = {}  # Dictionary to store data by group
-        self.individual_models_data = {}  # Store data for baseline and individual model
-
-    def _combine_models(self, weights: list[float]) -> ExplainableBoostingClassifier:
+        
+        self.model_plot_groups: list[ModelPlotGroup] = []  # List to store model plot groups
+        
+    def _combine_models(self, weights: list[float], model_indexes: list[int] = None):
         """Combine models using InterpretML's API capabilities"""
-        return CombinedEBM(self.models_to_combine[:, 1], weights)
+        if model_indexes is None:
+            model_indexes = list(range(len(self.models_to_combine)))
+        
+        selected_models = self.models_to_combine[model_indexes, 1]
+        return CombinedEBM(selected_models, weights)
         
     def _evaluate_model(self, model) -> dict:
         """Evaluate model using InterpretML's prediction format"""
@@ -98,192 +116,130 @@ class GenericGroupPerformanceAnalyzer:
             }
             
         raise ValueError(f"Unknown metric: {self.metric}")
-
-    def _plot_basecomb_models(self):
-        """Plots baseline models and models to combine differently, for clarity."""
-        # Define a unified style for baseline models
-        baseline_style = dict(s=50, marker='P', edgecolors='black', zorder=10, color='orange')
-        tocombine_style = dict(s=100, marker='o', edgecolors='black', zorder=10, color='red')
-
-        x_values = []
-        y_values = []
+    
+    def _setup_combination_models(self, n_combinations):
+        """Creates the combination groups, combines the models and stores the results"""
         
-        # Plot baseline models
-        for i, (label, model) in enumerate(self.baseline_models):
-            metrics = self._evaluate_model(model)
-            x_values.append(metrics[f'male_{self.metric}'])
-            y_values.append(metrics[f'female_{self.metric}'])
-
-            # Store metrics for interactivity
-            model_id = f"baseline_{i}"
-            self.individual_models_data[model_id] = {
-                'label': label,
-                'type': 'baseline',
-                'metrics': metrics
-            }
-
-        # Create a single scatter plot for all baseline models
-        scatter = self.ax.scatter(x_values, y_values, label="Baseline Models", **baseline_style)
-        self.scatter_plots["baseline"] = scatter
+        ### Setting up combination groups ###
+        combination_group_model_indexes: list[list[int]] = [] # list of list of ints containing indexes of models in each group
+        combination_group_model_indexes.append(list(range(len(self.models_to_combine)))) # All models group
         
-        # Plot models to combine
+        # Add models three by three (if possible)
+        if len(self.models_to_combine) >= 3:
+            for i in range(0, len(self.models_to_combine) - 1):
+                combination_group_model_indexes.append(list(range(i, i + 2)))
+        
+        # Process each group
+        for i, group in enumerate(combination_group_model_indexes):
+            # Generate weights for the current group
+            weight_sets = np.random.dirichlet(np.ones(len(group)), n_combinations)
+            instances_data = []
+            for weights in tqdm(weight_sets, desc=f"Processing Group {i + 1}/{len(combination_group_model_indexes)}"):
+                combined_model = self._combine_models(weights, group)
+                model_metrics = self._evaluate_model(combined_model)
+                
+                instances_data.append({
+                    "type": "combined",
+                    "model": combined_model,
+                    'weights': weights,
+                    'metrics': model_metrics
+                })
+            
+            self.model_plot_groups.append(
+                ModelPlotGroup(
+                    id=f"combination_group_{i}",
+                    label=f"Combination ({'ALL' if i == 0 else group})",
+                    scatter=None,  # Placeholder for scatter plot
+                    model_type="combined",
+                    instances_data=instances_data
+                )
+            )
+        
+    def _setup_individual_models(self):
+        """Creates the individual models and stores the results"""
+        # Process models to combine
+        tocombine_instances_data = []
         for i, (label, model) in enumerate(self.models_to_combine):
             metrics = self._evaluate_model(model)
-            x_values.append(metrics[f'male_{self.metric}'])
-            y_values.append(metrics[f'female_{self.metric}'])
-
-            # Store metrics for interactivity
-            model_id = f"tocombine_{i}"
-            self.individual_models_data[model_id] = {
+            tocombine_instances_data.append({
+                "type": "tocombine",
+                "model": model,
                 'label': label,
-                'type': 'tocombine',
                 'metrics': metrics
-            }
+            })
+        self.model_plot_groups.append(
+            ModelPlotGroup(
+                id="tocombine_models",
+                label="Models to Combine",
+                scatter=None,  # Placeholder for scatter plot
+                model_type="tocombine",
+                instances_data=tocombine_instances_data
+            )
+        )
         
-        scatter = self.ax.scatter(x_values, y_values, label="Models to Combine", **tocombine_style)
-        self.scatter_plots["tocombine"] = scatter
+        # Process baseline models
+        if len(self.baseline_models) == 0:
+            return
+        baseline_instances_data = []
+        for i, (label, model) in enumerate(self.baseline_models):
+            metrics = self._evaluate_model(model)
+            baseline_instances_data.append({
+                "model": model,
+                'label': label,
+                'metrics': metrics
+            })
+        self.model_plot_groups.append(
+            ModelPlotGroup(
+                id="baseline_models",
+                label="Baseline Models",
+                scatter=None,  # Placeholder for scatter plot
+                model_type="baseline",
+                instances_data=baseline_instances_data
+            )
+        )
         
-
-    def _generate_zero_weight_combinations(self, n_combinations, zero_index):
-        """Generate combinations where the specified model has zero weight"""
-        num_models = len(self.models_to_combine)
-        combinations = []
+    def _plot_model_groups(self):
+        """Plots the combination groups. which should already be setup"""
+        PLOT_STYLES = {
+            "tocombine": dict(s=100, marker='o', edgecolors='black', zorder=10, color='blue'),
+            "baseline": dict(s=50, marker='P', edgecolors='black', zorder=5, color='orange'),
+            "combined": dict(s=25, marker='o', zorder=1, alpha=0.6)
+        }
         
-        for _ in range(n_combinations):
-            # Generate weights for non-zero models
-            non_zero_weights = np.random.dirichlet(np.ones(num_models - 1))
-            
-            # Insert zero at the specified index
-            weights = np.insert(non_zero_weights, zero_index, 0)
-            combinations.append(weights)
-            
-        return np.array(combinations)
-
-    def generate_plot(self, n_combinations: int = 100):
-        """Generate the main performance comparison plot"""
-        num_models = len(self.models_to_combine)
-        
-        # Group 1: Standard combinations with all models
-        standard_weights = np.random.dirichlet(np.ones(num_models), n_combinations)
-        
-        # Create a list to store all combination groups with their colors and labels
-        self.combination_groups = [
-            {"id": "all_models", "weights": standard_weights, "color": "blue", "label": "Combinations: All Models"}
-        ]
-        
-        # Add zero-weight groups if we have 3 or more models
-        if num_models >= 3:
-            for i in range(min(3, num_models)):
-                model_name = self.models_to_combine[i][0]
-                zero_weights = self._generate_zero_weight_combinations(n_combinations // 3, i)
-                
-                self.combination_groups.append({
-                    "id": f"without_{i}",
-                    "weights": zero_weights,
-                    "color": ["red", "green", "purple"][i],  # Different color for each group
-                    "label": f"Without {model_name}"
-                })
-        
-        # Evaluate all combinations
-        self.metrics_data = []
-        self.group_data = {}
-        
-        for group in self.combination_groups:
-            group_metrics = []
-            
-            for w in tqdm(group["weights"], desc=f"Evaluating {group['label']}"):
-                combined = self._combine_models(w)
-                metrics = self._evaluate_model(combined)
-                metrics.update({
-                    'weights': w,
-                    'group_id': group["id"],
-                    'group_label': group["label"],
-                    'color': group["color"]
-                })
-                group_metrics.append(metrics)
-                self.metrics_data.append(metrics)
-            
-            self.group_data[group["id"]] = group_metrics
-
         # Create plot with adjusted figsize and more space for legend
         self.fig, self.ax = plt.subplots(figsize=(10, 8))
         
         # Adjust the subplot to make room for the legend
         plt.subplots_adjust(right=0.75)
         
-        # Plot each group with its own color
-        for group in self.combination_groups:
-            group_id = group["id"]
-            group_data = self.group_data[group_id]
+        for model_plot_group in self.model_plot_groups:
+            print(f"Plotting group: {model_plot_group.id}")
             
-            if group_data:
-                x_values = [m[f'male_{self.metric}'] for m in group_data]
-                y_values = [m[f'female_{self.metric}'] for m in group_data]
-                
-                scatter = self.ax.scatter(x_values, y_values, c=group["color"], 
-                                        alpha=0.6, label=group["label"])
-                self.scatter_plots[group_id] = scatter
+            x_values = [instance_data["metrics"][f'male_{self.metric}'] for instance_data in model_plot_group.instances_data]
+            y_values = [instance_data["metrics"][f'female_{self.metric}'] for instance_data in model_plot_group.instances_data]
+            
+            print(f"x: {x_values}, y: {y_values}")
+            
+            scatter = self.ax.scatter(x_values, y_values, label=model_plot_group.label,
+                                    **PLOT_STYLES[model_plot_group.model_type])
+            model_plot_group.scatter = scatter
         
-        self._plot_basecomb_models()
+        
+    def generate_plot(self, n_combinations: int = 100):
+        self._setup_combination_models(n_combinations)
+        self._setup_individual_models()
+        
+        self._plot_model_groups()
         self._configure_plot()
         self._setup_interactivity()
         
-        # Create and display the interactive dashboard
         display(self._create_display())
-
-    def _configure_plot(self):
-        """Configure plot aesthetics for InterpretML consistency"""
-        self.ax.set_xlabel(f"Male {self.metric.title().replace('_', ' ')}",
-                         fontsize=12)
-        self.ax.set_ylabel(f"Female {self.metric.title().replace('_', ' ')}",
-                         fontsize=12)
-        
-        if self.metric == "accuracy":
-            self.ax.plot([0, 1], [0, 1], 'k--', alpha=0.3)
-            
-        self.ax.grid(True, alpha=0.3)
-        
-        # Organize legend better with too many entries
-        handles, labels = self.ax.get_legend_handles_labels()
-        
-        # If we have more than 10 items, create a more compact legend
-        if len(handles) > 10:
-            # Group models by type and create custom legend entries
-            by_type = {}
-            # First add combination groups
-            for group in self.combination_groups:
-                by_type[group["label"]] = group["color"]
-                
-            # Then add baseline and model entries
-            baseline_group = []
-            model_group = []
-            
-            for model_id, data in self.individual_models_data.items():
-                if data['type'] == 'baseline':
-                    baseline_group.append(data['label'])
-                else:
-                    model_group.append(data['label'])
-            
-            # Use two-column layout for better space usage
-            self.ax.legend(handles, labels, loc='center left', bbox_to_anchor=(1.02, 0.5),
-                         frameon=False, fontsize=9, ncol=2)
-        else:
-            # Standard legend
-            self.ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5),
-                         frameon=False, fontsize=10)
-            
-        # Set legend title
-        legend = self.ax.get_legend()
-        if legend:
-            legend.set_title("Models", prop={'size': 12})
-
+    
     def _setup_interactivity(self):
         """Add interactive tooltips with model details."""
-        # Get all scatter plots (combinations and individual models)
-        all_scatter_plots = list(self.scatter_plots.values())
 
         # Create cursor for all scatter plots
-        cursor = mplcursors.cursor(all_scatter_plots)
+        cursor = mplcursors.cursor([mpg.scatter for mpg in self.model_plot_groups])
 
         @cursor.connect("add")
         def on_add(sel):
@@ -293,105 +249,81 @@ class GenericGroupPerformanceAnalyzer:
                 # Find which scatter plot was selected
                 selected_scatter = sel.artist
                 point_index = sel.index
-
-                # Check if it's the baseline scatter
-                if selected_scatter == self.scatter_plots["baseline"]:
-                    model_data = list(self.individual_models_data.values())[point_index]
-                    display(widgets.HTML(
-                        f"<div style='border: 1px solid #ccc; padding: 10px; border-radius: 5px;'>"
-                        f"<b>Baseline Model:</b> {model_data['label']}<br>"
-                        f"<b>Male {self.metric.title()}:</b> {model_data['metrics'][f'male_{self.metric}']:.3f}<br>"
-                        f"<b>Female {self.metric.title()}:</b> {model_data['metrics'][f'female_{self.metric}']:.3f}<br>"
-                        f"<b>Overall {self.metric.title()}:</b> {model_data['metrics'][f'overall_{self.metric}']:.3f}"
-                        "</div>"
-                    ))
-                else:
-                    # Handle other scatter plots (e.g., combinations)
-                    selected_id = None
-                    for model_id, scatter in self.scatter_plots.items():
-                        if scatter == selected_scatter:
-                            selected_id = model_id
-                            break
-
-                    if selected_id and point_index < len(self.group_data.get(selected_id, [])):
-                        metrics = self.group_data[selected_id][point_index]
-                        weights_str = ', '.join([f"{name}: {w:.2f}" for name, w in zip(self.models_to_combine[:, 0], metrics['weights'])])
-                        display(widgets.HTML(
-                            f"<div style='border: 1px solid #ccc; padding: 10px; border-radius: 5px;'>"
-                            f"<b>Group:</b> {metrics['group_label']}<br>"
-                            f"<b>Weights:</b> {weights_str}<br>"
-                            f"<b>Male {self.metric.title()}:</b> {metrics[f'male_{self.metric}']:.3f}<br>"
-                            f"<b>Female {self.metric.title()}:</b> {metrics[f'female_{self.metric}']:.3f}<br>"
-                            f"<b>Overall {self.metric.title()}:</b> {metrics[f'overall_{self.metric}']:.3f}"
-                            "</div>"
-                        ))
-
-    def _toggle_group_visibility(self, group_id, change):
-        """Toggle visibility of a group's scatter plot"""
-        if group_id in self.scatter_plots:
-            scatter = self.scatter_plots[group_id]
-            scatter.set_visible(change['new'])
-            self.fig.canvas.draw_idle()
-
-    def _create_checkboxes(self):
-        """Create checkboxes for toggling group visibility"""
-        checkbox_widgets = []
+                
+                # Find which model plot group this scatter belongs to
+                selected_group: ModelPlotGroup = next((mpg for mpg in self.model_plot_groups if mpg.scatter == selected_scatter), None)
+                point_instance_data: dict = selected_group.instances_data[point_index]
+                
+                # Display the model information
+                display(self._generate_info_html(selected_group, point_instance_data))
+    
+    def _generate_info_html(self, selected_group: ModelPlotGroup, instance_data: dict) -> widgets.HTML:
+        """Generate HTML for displaying model information"""
         
-        # Add checkboxes for combination groups
-        for group in self.combination_groups:
-            group_id = group["id"]
+        if selected_group.model_type == 'combined':
+            ws = ', '.join([f"{name}: {w:.2f}" for name, w in zip(self.models_to_combine[:, 0], instance_data['weights'])])
+            combination_weights_row = f"<b>Combination Weights:</b> {ws}"
+        else:
+            combination_weights_row = ""
+        
+        base_html: str = (
+            f"<div style='border: 1px solid #ccc; padding: 10px; border-radius: 5px;'>"
+            f"<h3>Info:</h3>"
+            f"<b>Group Label:</b> {selected_group.label.title()}<br>"
+            f"<b>Model Label:</b> {instance_data.get('label', 'N/A')}<br>"
+            f"{combination_weights_row}<br>"
+            f"<h3>Performance:</h3>"
+            f"<b>Male {self.metric.title()}:</b> {instance_data['metrics'][f'male_{self.metric}']:.3f}<br>"
+            f"<b>Female {self.metric.title()}:</b> {instance_data['metrics'][f'female_{self.metric}']:.3f}<br>"
+            f"<b>Overall {self.metric.title()}:</b> {instance_data['metrics'][f'overall_{self.metric}']:.3f}<br>"
+            "</div>"
+        )
+
+        return widgets.HTML(base_html)
+
+    def _configure_plot(self):
+        self.ax.set_xlabel(f"Male {self.metric.title().replace('_', ' ')}",
+                         fontsize=12)
+        self.ax.set_ylabel(f"Female {self.metric.title().replace('_', ' ')}",
+                         fontsize=12)
+        
+        if self.metric == "accuracy":
+            self.ax.plot([0, 1], [0, 1], 'k--', alpha=0.3)
+            
+        self.ax.grid(True, alpha=0.3)
+        self.ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5),
+                        frameon=False, fontsize=9)
+    
+    def _toggle_group_visibility(self, group: ModelPlotGroup, change):
+        group.scatter.set_visible(change['new'])
+        self.fig.canvas.draw_idle()
+    
+    def _create_togglevis_checkboxes(self) -> list[widgets.Checkbox]:
+        checkbox_widgets = []
+        for group in self.model_plot_groups:
             checkbox = widgets.Checkbox(
                 value=True,
-                description=group["label"],
+                description=group.label,
                 style={'description_width': 'initial'},
                 layout=widgets.Layout(margin='5px 0')
             )
-            checkbox.observe(lambda change, gid=group_id: self._toggle_group_visibility(gid, change), names='value')
+            checkbox.observe(lambda change, g=group: self._toggle_group_visibility(g, change), names='value')
             checkbox_widgets.append(checkbox)
         
-        # Add a "Baseline Models" checkbox to toggle all baseline models
-        if len(self.baseline_models) > 0:
-            baseline_checkbox = widgets.Checkbox(
-                value=True,
-                description="Baseline Models",
-                style={'description_width': 'initial'},
-                layout=widgets.Layout(margin='5px 0')
-            )
-            baseline_checkbox.observe(lambda change: self._toggle_model_type_visibility('baseline', change), names='value')
-            checkbox_widgets.append(baseline_checkbox)
-        
-        # Add a "Models to Combine" checkbox if needed
-        if len(self.models_to_combine) > 0:
-            combine_checkbox = widgets.Checkbox(
-                value=True,
-                description="Models to Combine",
-                style={'description_width': 'initial'},
-                layout=widgets.Layout(margin='5px 0')
-            )
-            combine_checkbox.observe(lambda change: self._toggle_model_type_visibility('combine', change), names='value')
-            checkbox_widgets.append(combine_checkbox)
-        
-        return widgets.VBox(checkbox_widgets)
+        return checkbox_widgets
+            
     
-    def _toggle_model_type_visibility(self, model_type, change):
-        """Toggle visibility for all models of a specific type"""
-        for model_id, data in self.individual_models_data.items():
-            if data['type'] == model_type:
-                scatter = self.scatter_plots[model_id]
-                scatter.set_visible(change['new'])
-        self.fig.canvas.draw_idle()
-
     def _create_display(self):
         """Create final widget layout with checkboxes for visibility control"""
         # Create checkboxes for plot control
-        checkboxes = self._create_checkboxes()
+        checkboxes = self._create_togglevis_checkboxes()
         
         # Create the control panel
         control_panel = widgets.VBox([
             widgets.HTML("<b>Model Details:</b>"),
             self.info_output,
             widgets.HTML("<b>Show/Hide Groups:</b>"),
-            checkboxes
+            widgets.VBox(checkboxes)
         ], layout={'width': '300px', 'margin': '0 20px'})
         
         # Make the figure canvas wider to accommodate the legend
