@@ -117,6 +117,47 @@ class GenericGroupPerformanceAnalyzer:
             
         raise ValueError(f"Unknown metric: {self.metric}")
     
+    def _order_models_to_combine(self):
+        ## Ordering of models to combine:
+        # Finding tocombine ModelPlotGroup
+        tocombine_group = next((mpg for mpg in self.model_plot_groups if mpg.id == "tocombine_models"), None)
+        if tocombine_group:
+            # Get the models to combine
+            model_metrics = [instance["metrics"] for instance in tocombine_group.instances_data]
+            
+            # Order models by proximity
+            ordered_indices = [0]  # Start with the first model
+            remaining_indices = list(range(1, len(self.models_to_combine)))
+            
+            while remaining_indices:
+                # Get the last ordered model's metrics
+                last_model_metrics = model_metrics[ordered_indices[-1]]
+                male_metric = last_model_metrics[f'male_{self.metric}']
+                female_metric = last_model_metrics[f'female_{self.metric}']
+                
+                # Find the closest model
+                closest_idx = None
+                min_distance = float('inf')
+                
+                for idx in remaining_indices:
+                    curr_metrics = model_metrics[idx]
+                    curr_male = curr_metrics[f'male_{self.metric}']
+                    curr_female = curr_metrics[f'female_{self.metric}']
+                    
+                    # Euclidean distance in the performance space
+                    distance = ((male_metric - curr_male) ** 2 + 
+                                (female_metric - curr_female) ** 2) ** 0.5
+                    
+                    if distance < min_distance:
+                        min_distance = distance
+                        closest_idx = idx
+                
+                ordered_indices.append(closest_idx)
+                remaining_indices.remove(closest_idx)
+            
+            # Re-order the models_to_combine array
+            self.models_to_combine = self.models_to_combine[ordered_indices]
+    
     def _setup_combination_models(self, n_combinations):
         """Creates the combination groups, combines the models and stores the results"""
         
@@ -124,7 +165,8 @@ class GenericGroupPerformanceAnalyzer:
         combination_group_model_indexes: list[list[int]] = [] # list of list of ints containing indexes of models in each group
         combination_group_model_indexes.append(list(range(len(self.models_to_combine)))) # All models group
         
-        # Add models three by three (if possible)
+        self._order_models_to_combine()
+        # Add models two by two (if possible)
         if len(self.models_to_combine) >= 3:
             for i in range(0, len(self.models_to_combine) - 1):
                 combination_group_model_indexes.append(list(range(i, i + 2)))
@@ -226,8 +268,8 @@ class GenericGroupPerformanceAnalyzer:
         
         
     def generate_plot(self, n_combinations: int = 100):
-        self._setup_combination_models(n_combinations)
         self._setup_individual_models()
+        self._setup_combination_models(n_combinations)
         
         self._plot_model_groups()
         self._configure_plot()
