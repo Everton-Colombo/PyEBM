@@ -166,7 +166,9 @@ class GenericGroupPerformanceAnalyzer:
         combination_group_model_indexes: list[list[int]] = [] # list of list of ints containing indexes of models in each group
         combination_group_model_indexes.append(list(range(len(self.models_to_combine)))) # All models group
         
-        # Add models three by three (if possible)
+        
+        
+        # Add models two by two
         if len(self.models_to_combine) >= 3:
             for i in range(0, len(self.models_to_combine) - 1):
                 combination_group_model_indexes.append(list(range(i, i + 2)))
@@ -465,7 +467,105 @@ class GenericGroupPerformanceAnalyzer:
             checkbox_widgets.append(checkbox)
         
         return checkbox_widgets
-            
+    
+    def _hide_dominated_models(self, _=None):
+        """Hide models that are dominated by other models on both metrics."""
+        with self.status_output:
+            clear_output(wait=True)
+            print("Hiding dominated models...")
+        
+        # Get all performance points from all models
+        all_points = []
+        model_info = []
+        
+        # Collect points from all groups
+        for group in self.model_plot_groups:
+            for i, instance in enumerate(group.instances_data):
+                # Skip the models_to_combine group as we always want to keep those
+                if group.model_type == "tocombine":
+                    continue
+                    
+                metrics = instance["metrics"]
+                male_metric = metrics[f'male_{self.metric}']
+                female_metric = metrics[f'female_{self.metric}']
+                all_points.append((male_metric, female_metric))
+                model_info.append((group, i))
+        
+        # Set to keep track of dominated point indices
+        dominated = set()
+        
+        # Higher values are better for all our metrics
+        for i, (x1, y1) in enumerate(all_points):
+            for j, (x2, y2) in enumerate(all_points):
+                if i != j:
+                    if x2 >= x1 and y2 >= y1 and (x2 > x1 or y2 > y1):
+                        # Point i is dominated by point j
+                        dominated.add(i)
+                        break
+        
+        # Track dominated points by group
+        dominated_by_group = {}
+        
+        for i, (group, point_idx) in enumerate(model_info):
+            if i in dominated:
+                if group.id not in dominated_by_group:
+                    dominated_by_group[group.id] = set()
+                dominated_by_group[group.id].add(point_idx)
+        
+        # Apply visibility to scatter plots
+        PLOT_STYLES = {
+            "tocombine": dict(s=100, marker='o', edgecolors='black', zorder=10, color='blue'),
+            "baseline": dict(s=50, marker='P', edgecolors='black', zorder=5, color='orange'),
+            "combined": dict(s=25, marker='o', zorder=1, alpha=0.6)
+        }
+        
+        for group in self.model_plot_groups:
+            if group.model_type == "tocombine":
+                # Always keep models to combine visible
+                continue
+                
+            if group.id in dominated_by_group:
+                # Get original scatter
+                old_scatter = group.scatter
+                
+                # Get the original data
+                offsets = old_scatter.get_offsets()
+                
+                # Create a mask for non-dominated points
+                mask = np.ones(len(group.instances_data), dtype=bool)
+                for idx in dominated_by_group[group.id]:
+                    mask[idx] = False
+                    
+                if np.any(mask):
+                    # Use the original plot style for this group type
+                    style = PLOT_STYLES[group.model_type].copy()
+                    
+                    # Create a new scatter plot with only non-dominated points
+                    new_scatter = self.ax.scatter(
+                        offsets[mask][:, 0], offsets[mask][:, 1],
+                        label=f"{group.label} (non-dominated)",
+                        **style
+                    )
+                    
+                    # Hide the original scatter
+                    old_scatter.set_visible(False)
+                    
+                    # Update the group's scatter reference
+                    group.scatter = new_scatter
+        
+        # Update the legend
+        self.ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5),
+                      frameon=False, fontsize=9)
+        
+        # Refresh the plot
+        self.fig.canvas.draw_idle()
+        
+        # Count dominated points
+        dominated_count = sum(len(points) for points in dominated_by_group.values())
+        
+        with self.status_output:
+            print(f"Hidden {dominated_count} dominated models out of {len(all_points)} total.")
+    
     def _create_display(self):
         """Create final widget layout with checkboxes for visibility control"""
         # Create checkboxes for plot control
@@ -482,10 +582,20 @@ class GenericGroupPerformanceAnalyzer:
         )
         selection_toggle.observe(self._toggle_selection_mode, names='value')
         
+        # Create button to hide dominated models
+        hide_dominated_button = widgets.Button(
+            description="Hide Dominated Models",
+            tooltip="Hide models that are dominated on both metrics",
+            layout={'width': 'auto'}
+        )
+        hide_dominated_button.on_click(self._hide_dominated_models)
+        
         # Create the control panel
         control_panel = widgets.VBox([
             widgets.HTML("<b>Model Selection:</b>"),
             selection_toggle,
+            widgets.HTML("<b>Optimization:</b>"),
+            hide_dominated_button,
             self.status_output,
             widgets.HTML("<b>Model Details:</b>"),
             self.info_output,
