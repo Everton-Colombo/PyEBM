@@ -40,8 +40,8 @@ class GenericGroupPerformanceAnalyzer:
                  feature_of_interest: str = 'sex',
                  metric: Literal["accuracy", "log_likelihood", "auc"] = "accuracy"):
         
-        self.models_to_combine = np.array(models_to_combine)
-        self.baseline_models = np.array(baseline_models)
+        self.models_to_combine = list(models_to_combine)  # Changed to list for mutability
+        self.baseline_models = list(baseline_models)  # Changed to list for mutability
         self.X_test = X_test
         self.y_test = y_test
         self.X_train = X_train
@@ -62,6 +62,9 @@ class GenericGroupPerformanceAnalyzer:
         self.fig = None
         self.ax = None
         self.info_output = widgets.Output()
+        self.status_output = widgets.Output()  # New output for status messages
+        self.selection_mode = False  # Track if we're in selection mode
+        self.n_combinations = 100  # Store the number of combinations
         
         self.model_plot_groups: list[ModelPlotGroup] = []  # List to store model plot groups
         
@@ -70,7 +73,7 @@ class GenericGroupPerformanceAnalyzer:
         if model_indexes is None:
             model_indexes = list(range(len(self.models_to_combine)))
         
-        selected_models = self.models_to_combine[model_indexes, 1]
+        selected_models = np.array(self.models_to_combine)[model_indexes, 1]
         return CombinedEBM(selected_models, weights)
         
     def _evaluate_model(self, model) -> dict:
@@ -117,6 +120,45 @@ class GenericGroupPerformanceAnalyzer:
             
         raise ValueError(f"Unknown metric: {self.metric}")
     
+    @staticmethod
+    def _generate_random_weights(list_size: int, n_lists: int, strategy: Literal["dirichlet", "uniform", "sparse"] = "dirichlet") -> np.ndarray:
+        
+        if strategy == "dirichlet":
+            # Sample from Dirichlet distribution
+            weights = np.random.dirichlet(np.ones(list_size), size=n_lists)
+        elif strategy == "uniform":
+            # Sample from uniform distribution
+            weights = np.random.uniform(0.1, 1.0, size=(n_lists, list_size))
+            
+            # Normalize each row to sum to 1
+            row_sums = weights.sum(axis=1, keepdims=True)
+            weights = weights / row_sums
+        elif strategy == "sparse":
+            # Initialize weights array
+            weights = np.zeros((n_lists, list_size))
+            
+            # Ensure we cover all positions being "near-zero" across combinations
+            near_zero_value = 0.001  # Very small but not zero to maintain mathematical properties
+            
+            # Calculate how many combinations per position should have near-zero weights
+            samples_per_position = max(1, n_lists // list_size)
+            
+            for pos in range(list_size):
+                # Select random samples to have near-zero weight at this position
+                near_zero_samples = np.random.choice(n_lists, size=samples_per_position, replace=False)
+                
+                # Fill all weights first with random values
+                weights[:, pos] = np.random.uniform(0.2, 1.0, size=n_lists)
+                
+                # Set the selected samples to have near-zero weight at this position
+                weights[near_zero_samples, pos] = near_zero_value
+            
+            # Normalize each row to sum to 1
+            row_sums = weights.sum(axis=1, keepdims=True)
+            weights = weights / row_sums
+        
+        return weights
+    
     def _setup_combination_models(self, n_combinations):
         """Creates the combination groups, combines the models and stores the results"""
         
@@ -132,7 +174,7 @@ class GenericGroupPerformanceAnalyzer:
         # Process each group
         for i, group in enumerate(combination_group_model_indexes):
             # Generate weights for the current group
-            weight_sets = np.random.dirichlet(np.ones(len(group)), n_combinations)
+            weight_sets = self._generate_random_weights(len(group), n_combinations, strategy="sparse")
             instances_data = []
             for weights in tqdm(weight_sets, desc=f"Processing Group {i + 1}/{len(combination_group_model_indexes)}"):
                 combined_model = self._combine_models(weights, group)
@@ -224,20 +266,69 @@ class GenericGroupPerformanceAnalyzer:
                                     **PLOT_STYLES[model_plot_group.model_type])
             model_plot_group.scatter = scatter
         
+    def _handle_model_selection(self, sel):
+        """Handle baseline model selection when in selection mode"""
+        selected_scatter = sel.artist
+        point_index = sel.index
         
-    def generate_plot(self, n_combinations: int = 100):
-        self._setup_combination_models(n_combinations)
+        # Find which model plot group this scatter belongs to
+        selected_group = next((mpg for mpg in self.model_plot_groups if mpg.scatter == selected_scatter), None)
+        
+        # Only process if it's a baseline model and we're in selection mode
+        if not self.selection_mode or selected_group.model_type != "baseline":
+            return
+            
+        # Get the selected model instance
+        selected_instance = selected_group.instances_data[point_index]
+        model_label = selected_instance['label']
+        model = selected_instance['model']
+        
+        # Find the model in baseline_models
+        for i, (label, mdl) in enumerate(self.baseline_models):
+            if label == model_label and mdl is model:
+                # Move the model from baseline to models_to_combine
+                self.models_to_combine.append(self.baseline_models.pop(i))
+                
+                with self.status_output:
+                    clear_output(wait=True)
+                    print(f"Added '{model_label}' to models to combine. Recalculating...")
+                
+                # Regenerate the plot
+                self._regenerate_plot()
+                break
+                
+    def _regenerate_plot(self):
+        """Clear and regenerate the model combinations and plot"""
+        # Clear existing plot
+        plt.close(self.fig)
+        
+        # Clear model plot groups
+        self.model_plot_groups = []
+        
+        # Regenerate combinations and plot
+        self._setup_combination_models(self.n_combinations)
         self._setup_individual_models()
-        
         self._plot_model_groups()
         self._configure_plot()
         self._setup_interactivity()
         
-        display(self._create_display())
+        # Update the display
+        with self.display_container:
+            clear_output(wait=True)
+            display(self._create_display())
+            
+    def _toggle_selection_mode(self, change):
+        """Toggle the model selection mode"""
+        self.selection_mode = change['new']
+        with self.status_output:
+            clear_output(wait=True)
+            if self.selection_mode:
+                print("Selection mode ON: Click on a baseline model to add it to models to combine.")
+            else:
+                print("Selection mode OFF")
     
     def _setup_interactivity(self):
         """Add interactive tooltips with model details."""
-
         # Create cursor for all scatter plots
         cursor = mplcursors.cursor([mpg.scatter for mpg in self.model_plot_groups])
 
@@ -251,17 +342,80 @@ class GenericGroupPerformanceAnalyzer:
                 point_index = sel.index
                 
                 # Find which model plot group this scatter belongs to
-                selected_group: ModelPlotGroup = next((mpg for mpg in self.model_plot_groups if mpg.scatter == selected_scatter), None)
-                point_instance_data: dict = selected_group.instances_data[point_index]
+                selected_group = next((mpg for mpg in self.model_plot_groups if mpg.scatter == selected_scatter), None)
+                point_instance_data = selected_group.instances_data[point_index]
                 
                 # Display the model information
                 display(self._generate_info_html(selected_group, point_instance_data))
+                
+        # Add click handling for model selection
+        self.fig.canvas.mpl_connect('button_press_event', lambda event: self._handle_click_event(event, cursor))
+        
+    def _handle_click_event(self, event, cursor):
+        """Handle clicks on the plot"""
+        if not self.selection_mode:
+            return
+            
+        # Find the nearest point to the click
+        target = None
+        min_dist = float('inf')
+        
+        for mpg in self.model_plot_groups:
+            if mpg.model_type != "baseline":
+                continue
+                
+            # Get the x and y data from the scatter plot
+            x_data = mpg.scatter.get_offsets()[:, 0]
+            y_data = mpg.scatter.get_offsets()[:, 1]
+            
+            for i, (x, y) in enumerate(zip(x_data, y_data)):
+                dist = np.sqrt((event.xdata - x)**2 + (event.ydata - y)**2)
+                if dist < min_dist and dist < 0.01:  # Threshold for selection
+                    min_dist = dist
+                    target = (mpg, i)
+        
+        if target:
+            selected_group, point_index = target
+            # Process the selection
+            selected_instance = selected_group.instances_data[point_index]
+            model_label = selected_instance['label']
+            model = selected_instance['model']
+            
+            # Find the model in baseline_models
+            for i, (label, mdl) in enumerate(self.baseline_models):
+                if label == model_label and mdl is model:
+                    # Move the model from baseline to models_to_combine
+                    self.models_to_combine.append(self.baseline_models.pop(i))
+                    
+                    with self.status_output:
+                        clear_output(wait=True)
+                        print(f"Added '{model_label}' to models to combine. Recalculating...")
+                    
+                    # Regenerate the plot
+                    self._regenerate_plot()
+                    break
+        
+    def generate_plot(self, n_combinations: int = 100):
+        self.n_combinations = n_combinations
+        self._setup_combination_models(n_combinations)
+        self._setup_individual_models()
+        
+        self._plot_model_groups()
+        self._configure_plot()
+        self._setup_interactivity()
+        
+        # Create a container for the display
+        self.display_container = widgets.Output()
+        with self.display_container:
+            display(self._create_display())
+        
+        display(self.display_container)
     
     def _generate_info_html(self, selected_group: ModelPlotGroup, instance_data: dict) -> widgets.HTML:
         """Generate HTML for displaying model information"""
         
         if selected_group.model_type == 'combined':
-            ws = ', '.join([f"{name}: {w:.2f}" for name, w in zip(self.models_to_combine[:, 0], instance_data['weights'])])
+            ws = ', '.join([f"{name}: {w:.2f}" for name, w in zip(np.array(self.models_to_combine)[:, 0], instance_data['weights'])])
             combination_weights_row = f"<b>Combination Weights:</b> {ws}"
         else:
             combination_weights_row = ""
@@ -312,14 +466,27 @@ class GenericGroupPerformanceAnalyzer:
         
         return checkbox_widgets
             
-    
     def _create_display(self):
         """Create final widget layout with checkboxes for visibility control"""
         # Create checkboxes for plot control
         checkboxes = self._create_togglevis_checkboxes()
         
+        # Create selection mode toggle
+        selection_toggle = widgets.ToggleButton(
+            value=False,
+            description='Selection Mode',
+            disabled=False,
+            button_style='', 
+            tooltip='Toggle selection mode to add baseline models to the combination',
+            layout={'width': 'auto'}
+        )
+        selection_toggle.observe(self._toggle_selection_mode, names='value')
+        
         # Create the control panel
         control_panel = widgets.VBox([
+            widgets.HTML("<b>Model Selection:</b>"),
+            selection_toggle,
+            self.status_output,
             widgets.HTML("<b>Model Details:</b>"),
             self.info_output,
             widgets.HTML("<b>Show/Hide Groups:</b>"),
