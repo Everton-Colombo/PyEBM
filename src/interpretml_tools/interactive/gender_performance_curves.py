@@ -38,7 +38,8 @@ class GenericGroupPerformanceAnalyzer:
                  X_train: pd.DataFrame = None, y_train: np.ndarray = None,
                  male_mask: np.ndarray = None, female_mask: np.ndarray = None,
                  feature_of_interest: str = 'sex',
-                 metric: Literal["accuracy", "log_likelihood", "auc"] = "accuracy"):
+                 metric: Literal["accuracy", "log_likelihood", "auc"] = "accuracy",
+                 **kwargs):
         
         self.models_to_combine = np.array(models_to_combine)
         self.baseline_models = np.array(baseline_models)
@@ -48,6 +49,7 @@ class GenericGroupPerformanceAnalyzer:
         self.y_train = y_train
         self.feature_of_interest = feature_of_interest
         self.metric = metric
+        self.kwargs = kwargs
         
         # Create masks for groups
         if male_mask is None or female_mask is None:
@@ -158,6 +160,57 @@ class GenericGroupPerformanceAnalyzer:
             # Re-order the models_to_combine array
             self.models_to_combine = self.models_to_combine[ordered_indices]
     
+    @staticmethod
+    def _generate_random_weights(list_size: int, n_lists: int, strategy: Literal["dirichlet", "uniform", "orthant_uniform", "orthant_chi"] = "dirichlet") -> np.ndarray:
+        n = n_lists
+        d = list_size
+        
+        if strategy == "dirichlet":
+            # Sample from Dirichlet distribution
+            weights = np.random.dirichlet(np.ones(list_size), size=n_lists)
+        elif strategy == "uniform":
+            # Sample from uniform distribution
+            weights = np.random.uniform(0.1, 1.0, size=(n_lists, list_size))
+            
+            # Normalize each row to sum to 1
+            row_sums = weights.sum(axis=1, keepdims=True)
+            weights = weights / row_sums
+        elif strategy == "orthant_uniform":
+            # Since the positive orthant is 1/2^d of the hypersphere,
+            # we need to use rejection sampling efficiently
+            
+            weights = []
+            total_generated = 0
+            
+            # We'll generate points in batches to improve efficiency
+            batch_size = max(100, n * 2**d)  # Adjusted for dimensionality
+            
+            while len(weights) < n:
+                # Generate a batch of points on the full hypersphere
+                candidates = np.random.normal(size=(batch_size, d))
+                norms = np.linalg.norm(candidates, axis=1, keepdims=True)
+                candidates = candidates / norms
+                
+                # Filter for points where all coordinates are positive
+                mask = np.all(candidates > 0, axis=1)
+                positive_points = candidates[mask]
+                
+                # Add the found positive points to our collection
+                weights.extend(positive_points)
+                total_generated += batch_size
+                
+            # Trim to exactly n points
+            weights = np.array(weights[:n])
+        elif strategy == "orthant_chi":
+            # Generate points using the chi distribution for the positive orthant
+            weights = np.random.chisquare(df=1, size=(n, d))
+            
+            # Normalize to place on the unit hypersphere
+            norms = np.linalg.norm(weights, axis=1, keepdims=True)
+            weights = weights / norms
+        
+        return weights
+    
     def _setup_combination_models(self, n_combinations):
         """Creates the combination groups, combines the models and stores the results"""
         
@@ -174,7 +227,8 @@ class GenericGroupPerformanceAnalyzer:
         # Process each group
         for i, group in enumerate(combination_group_model_indexes):
             # Generate weights for the current group
-            weight_sets = np.random.dirichlet(np.ones(len(group)), n_combinations)
+            weight_sets = self._generate_random_weights(len(group), n_combinations, strategy=self.kwargs.get("weight_strategy", "orthant_chi"))
+            # Generate the combined models
             instances_data = []
             for weights in tqdm(weight_sets, desc=f"Processing Group {i + 1}/{len(combination_group_model_indexes)}"):
                 combined_model = self._combine_models(weights, group)
