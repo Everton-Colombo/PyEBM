@@ -1,4 +1,5 @@
 from typing import List, Literal
+import sys
 
 # Data Processing:
 import pandas as pd
@@ -11,7 +12,7 @@ from sklearn.metrics import roc_auc_score
 import matplotlib.pyplot as plt
 import ipywidgets as widgets
 from IPython.display import display, clear_output
-from tqdm import tqdm
+import tqdm
 import mplcursors
 
 from dataclasses import dataclass, field
@@ -247,7 +248,7 @@ class GenericGroupPerformanceAnalyzer:
             )
             # Generate the combined models
             instances_data = []
-            for weights in tqdm(weight_sets, desc=f"Processing Group {i + 1}/{len(combination_group_model_indexes)}"):
+            for weights in tqdm.tqdm(weight_sets, desc=f"Processing Group {i + 1}/{len(combination_group_model_indexes)}", file=sys.stdout):
                 combined_model = self._combine_models(weights, group)
                 model_metrics = self._evaluate_model(combined_model)
                 
@@ -328,6 +329,29 @@ class GenericGroupPerformanceAnalyzer:
             scatter = self.ax.scatter(x_values, y_values, label=model_plot_group.label,
                                     **self.PLOT_STYLES[model_plot_group.model_type])
             model_plot_group.scatter = scatter
+            
+            # Add annotations for models to combine
+            if model_plot_group.id == "tocombine_models":
+                for i, (x, y) in enumerate(zip(x_values, y_values)):
+                    # Get the model instance from the instance_data
+                    model_instance = model_plot_group.instances_data[i]["model"]
+                    
+                    # Find the index of this model in self.models_to_combine
+                    for j, (_, m) in enumerate(self.models_to_combine):
+                        if m is model_instance:  # Check if they're the same object
+                            # Add annotation with the correct model index
+                            self.ax.annotate(
+                                str(j),
+                                (x, y),
+                                textcoords="offset points",
+                                xytext=(-10, -15),  # Position below the point
+                                ha='center',
+                                fontweight='bold',
+                                fontsize=9,
+                                bbox=dict(fc='black', alpha=0.5, edgecolor='none'),
+                                color='white'
+                            )
+                            break
         
     def generate_plot(self, initial: bool = True):
         if self.fig:
