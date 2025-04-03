@@ -16,6 +16,8 @@ import mplcursors
 
 from dataclasses import dataclass, field
 
+from .._utils.event import Event
+
 @dataclass
 class ModelPlotGroup:
     id: str
@@ -38,12 +40,14 @@ class GenericGroupPerformanceAnalyzer:
         "baseline": dict(s=50, marker='P', edgecolors='black', zorder=5, color='orange'),
         "combined": dict(s=25, marker='o', zorder=1, alpha=0.6)
     }
+    modelSelected_event = Event()
     
     def __init__(self, models_to_combine: List[tuple[str, EBMModel]],
                  baseline_models: List[tuple[str, EBMModel]],
                  X_test: pd.DataFrame, y_test: np.ndarray,
                  X_train: pd.DataFrame = None, y_train: np.ndarray = None,
                  male_mask: np.ndarray = None, female_mask: np.ndarray = None,
+                 n_combination_main: int = 100, n_combination_sub: int = 10,
                  feature_of_interest: str = 'sex',
                  metric: Literal["accuracy", "log_likelihood", "auc"] = "accuracy",
                  **kwargs):
@@ -54,6 +58,8 @@ class GenericGroupPerformanceAnalyzer:
         self.y_test = y_test
         self.X_train = X_train
         self.y_train = y_train
+        self.n_combinations_main = n_combination_main
+        self.n_combinations_sub = n_combination_sub
         self.feature_of_interest = feature_of_interest
         self.metric = metric
         self.kwargs = kwargs
@@ -70,9 +76,10 @@ class GenericGroupPerformanceAnalyzer:
         
         self.fig = None
         self.ax = None
-        self.info_output = widgets.Output()
         
+        self.display_container = widgets.Output()
         self.model_plot_groups: list[ModelPlotGroup] = []  # List to store model plot groups
+        
         
     def _combine_models(self, weights: list[float], model_indexes: list[int] = None):
         """Combine models using InterpretML's API capabilities"""
@@ -218,7 +225,7 @@ class GenericGroupPerformanceAnalyzer:
         
         return weights
     
-    def _setup_combination_models(self, n_combinations):
+    def _setup_combination_models(self):
         """Creates the combination groups, combines the models and stores the results"""
         
         ### Setting up combination groups ###
@@ -234,7 +241,10 @@ class GenericGroupPerformanceAnalyzer:
         # Process each group
         for i, group in enumerate(combination_group_model_indexes):
             # Generate weights for the current group
-            weight_sets = self._generate_random_weights(len(group), n_combinations, strategy=self.kwargs.get("weight_strategy", "orthant_chi"))
+            weight_sets = self._generate_random_weights(
+                len(group), self.n_combinations_main if i == 0 else self.n_combinations_sub,
+                strategy=self.kwargs.get("weight_strategy", "orthant_chi")
+            )
             # Generate the combined models
             instances_data = []
             for weights in tqdm(weight_sets, desc=f"Processing Group {i + 1}/{len(combination_group_model_indexes)}"):
@@ -319,16 +329,24 @@ class GenericGroupPerformanceAnalyzer:
                                     **self.PLOT_STYLES[model_plot_group.model_type])
             model_plot_group.scatter = scatter
         
+    def generate_plot(self, initial: bool = True):
+        if self.fig:
+            plt.close(self.fig)
+        self.model_plot_groups = []
         
-    def generate_plot(self, n_combinations: int = 100):
         self._setup_individual_models()
-        self._setup_combination_models(n_combinations)
+        self._setup_combination_models()
         
         self._plot_model_groups()
         self._configure_plot()
         self._setup_interactivity()
         
-        display(self._create_display())
+        with self.display_container:
+            clear_output(wait=True)
+            display(self._create_display())
+        
+        if initial:
+            display(self.display_container)
     
     def _setup_interactivity(self):
         """Add interactive tooltips with model details."""
@@ -337,22 +355,26 @@ class GenericGroupPerformanceAnalyzer:
 
         # Create cursor for all scatter plots
         cursor = mplcursors.cursor([mpg.scatter for mpg in self.model_plot_groups])
+        self.modelSelected_event.add_listener(lambda selected_model: print(selected_model))
 
         @cursor.connect("add")
         def on_add(sel):
-            with self.info_output:
-                clear_output(wait=True)
-
-                # Find which scatter plot was selected
-                selected_scatter = sel.artist
-                point_index = sel.index
-                
-                # Find which model plot group this scatter belongs to
-                selected_group: ModelPlotGroup = next((mpg for mpg in self.model_plot_groups if mpg.scatter == selected_scatter), None)
-                point_instance_data: dict = selected_group.instances_data[point_index]
-                
-                # Display the model information
-                display(self._generate_info_html(selected_group, point_instance_data))
+            # Find which scatter plot was selected
+            selected_scatter = sel.artist
+            point_index = sel.index
+            
+            # Find which model plot group this scatter belongs to
+            selected_group: ModelPlotGroup = next((mpg for mpg in self.model_plot_groups if mpg.scatter == selected_scatter), None)
+            point_instance_data: dict = selected_group.instances_data[point_index]
+            
+            # Update selected model information
+            selected_model = {
+                "group": selected_group,
+                "index": point_index,
+                "instance_data": point_instance_data
+            }
+            # Trigger the event with the selected model
+            self.modelSelected_event.trigger(selected_model)
     
     def _generate_info_html(self, selected_group: ModelPlotGroup, instance_data: dict) -> widgets.HTML:
         """Generate HTML for displaying model information"""
@@ -364,12 +386,12 @@ class GenericGroupPerformanceAnalyzer:
             combination_weights_row = ""
         
         base_html: str = (
-            f"<div style='border: 1px solid #ccc; padding: 10px; border-radius: 5px;'>"
-            f"<h3>Info:</h3>"
+            f"<div style='border: 1px solid #ccc; padding: 10px;'>"
+            f"<b>Info:</b><br>"
             f"<b>Group Label:</b> {selected_group.label.title()}<br>"
             f"<b>Model Label:</b> {instance_data.get('label', 'N/A')}<br>"
             f"{combination_weights_row}<br>"
-            f"<h3>Performance:</h3>"
+            f"<b>Performance:</b><br>"
             f"<b>Male {self.metric.title()}:</b> {instance_data['metrics'][f'male_{self.metric}']:.3f}<br>"
             f"<b>Female {self.metric.title()}:</b> {instance_data['metrics'][f'female_{self.metric}']:.3f}<br>"
             f"<b>Overall {self.metric.title()}:</b> {instance_data['metrics'][f'overall_{self.metric}']:.3f}<br>"
@@ -450,8 +472,39 @@ class GenericGroupPerformanceAnalyzer:
             
             group.scatter.set_sizes(new_sizes)
             self.fig.canvas.draw_idle() # redraw
+            
     
-    def _create_togglevis_checkboxes(self) -> list[widgets.Checkbox]:
+    def _create_display(self):
+        """Create final widget layout with checkboxes for visibility control"""
+        # Create checkboxes for plot control
+        self.info_output = widgets.Output()
+        def update_info_output(selected_model):
+            with self.info_output:
+                clear_output(wait=True)
+                if selected_model["instance_data"]:
+                    display(self._generate_info_html(selected_model["group"], selected_model["instance_data"]))
+        self.modelSelected_event.add_listener(update_info_output)
+        
+        # Create the control panel
+        control_panel = widgets.VBox([
+            widgets.HTML("<b>Model Details:</b>"),
+            self.info_output,
+            widgets.HTML("<b>Show/Hide Groups:</b>"),
+            self._create_togglevis_checkboxes(),
+            widgets.HTML("<b>Models to Combine:</b>"),
+            self._create_mtc_card()
+        ], layout={'width': '300px', 'margin': '0 20px'})
+        
+        # Make the figure canvas wider to accommodate the legend
+        fig_canvas = self.fig.canvas
+        fig_canvas.layout.width = '800px'
+        
+        return widgets.HBox([
+            control_panel,
+            fig_canvas
+        ])
+        
+    def _create_togglevis_checkboxes(self) -> widgets.VBox:
         checkbox_widgets = []
         
         dom_cb = widgets.Checkbox(
@@ -476,27 +529,63 @@ class GenericGroupPerformanceAnalyzer:
             checkbox.observe(lambda change, g=group: self._toggle_group_visibility(g, change), names='value')
             checkbox_widgets.append(checkbox)
         
-        return checkbox_widgets
-            
+        return widgets.VBox(checkbox_widgets, layout={'border': 'solid 1px #ccc', 'overflow': 'hidden scroll', 'height': '200px'})
     
-    def _create_display(self):
-        """Create final widget layout with checkboxes for visibility control"""
-        # Create checkboxes for plot control
-        checkboxes = self._create_togglevis_checkboxes()
+    def _create_mtc_card(self):
+        add_model_btn = widgets.Button(
+            description='Add to Models to Combine',
+            disabled=True,
+            button_style='primary',
+            tooltip='Add selected baseline model to models to combine',
+            layout=widgets.Layout(width='100%', margin='10px 0')
+        )
+        # Enable button when baseline model is selected
+        def update_button_state(selected_model):
+            add_model_btn.disabled = (
+                selected_model["group"] is None or 
+                selected_model["group"].model_type != "baseline"
+            )
+    
+        self.modelSelected_event.add_listener(update_button_state)
         
-        # Create the control panel
-        control_panel = widgets.VBox([
-            widgets.HTML("<b>Model Details:</b>"),
-            self.info_output,
-            widgets.HTML("<b>Show/Hide Groups:</b>"),
-            widgets.VBox(checkboxes, layout={"border": "solid 1px #ccc", "overflow": "hidden scroll", "height": "200px"}),
-        ], layout={'width': '300px', 'margin': '0 20px'})
+        def add_model_to_combine(btn):
+            selected_model = self.modelSelected_event.last_trigger_args[0]
+            if selected_model is None:
+                return
+                
+            selected_model = selected_model
+            selected_group = selected_model["group"]
+            selected_index = selected_model["index"]
+            
+            if selected_group is None or selected_group.model_type != "baseline":
+                return
+                
+            # Get the model info from baseline_models array
+            baseline_model_label = self.baseline_models[selected_index][0]
+            baseline_model_instance = self.baseline_models[selected_index][1]
+            
+            # Remove from baseline_models
+            self.baseline_models = np.delete(self.baseline_models, selected_index, axis=0)
+            
+            # Add to models_to_combine
+            self.models_to_combine = np.append(
+                self.models_to_combine, 
+                np.array([(baseline_model_label, baseline_model_instance)]), 
+                axis=0
+            )
+            
+            self.generate_plot(False)
+                
+        # Add functionality to button
+        add_model_btn.on_click(add_model_to_combine)
         
-        # Make the figure canvas wider to accommodate the legend
-        fig_canvas = self.fig.canvas
-        fig_canvas.layout.width = '800px'
+        # Creating list of models to combine
+        mtc_list = widgets.VBox([
+            widgets.HTML(f"<b>{i}:</b> {label}") for i, label in enumerate(self.models_to_combine[:, 0])
+        ], layout={'height': '200px', 'overflow': "auto", 'border': 'solid 1px #ccc', 'scrollbar-width': 'thin'})
         
-        return widgets.HBox([
-            control_panel,
-            fig_canvas
-        ])
+        return widgets.VBox([
+            mtc_list,
+            add_model_btn,
+        ], layout={'border': 'solid 1px #ccc', 'overflow': 'hidden', 'padding': '10px', 'width': '300px'})
+        
