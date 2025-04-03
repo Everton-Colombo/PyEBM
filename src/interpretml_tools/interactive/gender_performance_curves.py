@@ -14,7 +14,7 @@ from IPython.display import display, clear_output
 from tqdm import tqdm
 import mplcursors
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass
 class ModelPlotGroup:
@@ -30,8 +30,15 @@ class ModelPlotGroup:
     #         "metrics": dict
     #     }
     # ]
+    additional_group_data: dict = field(default_factory=lambda: {})
 
 class GenericGroupPerformanceAnalyzer:
+    PLOT_STYLES = {
+        "tocombine": dict(s=100, marker='o', edgecolors='black', zorder=10, color='blue'),
+        "baseline": dict(s=50, marker='P', edgecolors='black', zorder=5, color='orange'),
+        "combined": dict(s=25, marker='o', zorder=1, alpha=0.6)
+    }
+    
     def __init__(self, models_to_combine: List[tuple[str, EBMModel]],
                  baseline_models: List[tuple[str, EBMModel]],
                  X_test: pd.DataFrame, y_test: np.ndarray,
@@ -296,28 +303,20 @@ class GenericGroupPerformanceAnalyzer:
         
     def _plot_model_groups(self):
         """Plots the combination groups. which should already be setup"""
-        PLOT_STYLES = {
-            "tocombine": dict(s=100, marker='o', edgecolors='black', zorder=10, color='blue'),
-            "baseline": dict(s=50, marker='P', edgecolors='black', zorder=5, color='orange'),
-            "combined": dict(s=25, marker='o', zorder=1, alpha=0.6)
-        }
-        
         # Create plot with adjusted figsize and more space for legend
         self.fig, self.ax = plt.subplots(figsize=(10, 8))
+        
         
         # Adjust the subplot to make room for the legend
         plt.subplots_adjust(right=0.75)
         
         for model_plot_group in self.model_plot_groups:
-            print(f"Plotting group: {model_plot_group.id}")
             
             x_values = [instance_data["metrics"][f'male_{self.metric}'] for instance_data in model_plot_group.instances_data]
             y_values = [instance_data["metrics"][f'female_{self.metric}'] for instance_data in model_plot_group.instances_data]
             
-            print(f"x: {x_values}, y: {y_values}")
-            
             scatter = self.ax.scatter(x_values, y_values, label=model_plot_group.label,
-                                    **PLOT_STYLES[model_plot_group.model_type])
+                                    **self.PLOT_STYLES[model_plot_group.model_type])
             model_plot_group.scatter = scatter
         
         
@@ -333,6 +332,8 @@ class GenericGroupPerformanceAnalyzer:
     
     def _setup_interactivity(self):
         """Add interactive tooltips with model details."""
+        
+        self._identify_dominated_models()
 
         # Create cursor for all scatter plots
         cursor = mplcursors.cursor([mpg.scatter for mpg in self.model_plot_groups])
@@ -394,8 +395,77 @@ class GenericGroupPerformanceAnalyzer:
         group.scatter.set_visible(change['new'])
         self.fig.canvas.draw_idle()
     
+    def _identify_dominated_models(self):
+        """
+        Identify dominated models in the performance space, marking it in each
+        group's instances_data.
+        """
+        
+        all_points = []
+        for group in self.model_plot_groups:
+            for i, instance_data in enumerate(group.instances_data):
+                all_points.append({
+                    'group': group,
+                    'index': i,
+                    'male_metric': instance_data['metrics'][f'male_{self.metric}'],
+                    'female_metric': instance_data['metrics'][f'female_{self.metric}'],
+                    'model_type': group.model_type
+                })
+        
+        for point in all_points:
+            is_dominated = False
+            for other_point in all_points:
+                if point == other_point:
+                    continue
+                
+                if (other_point['male_metric'] >= point['male_metric'] and 
+                    other_point['female_metric'] >= point['female_metric'] and
+                    (other_point['male_metric'] > point['male_metric'] or 
+                     other_point['female_metric'] > point['female_metric'])):
+                    # Mark the point as dominated
+                    is_dominated = True
+                    break
+            
+            
+            point['group'].instances_data[point['index']]['is_dominated'] = is_dominated
+                
+    def _toggle_dominated_visibility(self, show_dominated: bool):
+        """Toggle visibility of dominated models. _identify_dominated_models must be called first."""        
+        for group in self.model_plot_groups:
+            if group.id == "tocombine_models":
+                continue
+            
+            sizes = group.scatter.get_sizes()
+            new_sizes = []
+            
+            # Store original sizes if not already stored
+            if not 'original_sizes' in group.additional_group_data:
+                group.additional_group_data["original_sizes"] = sizes.copy() if len(sizes) > 1 else [sizes[0]] * len(group.instances_data)
+            
+            for i, instance_data in enumerate(group.instances_data):
+                if not show_dominated and instance_data.get('is_dominated', False):
+                    new_sizes.append(0) # Hide dominated points by setting size to 0 (preserve position)
+                else:
+                    new_sizes.append(group.additional_group_data["original_sizes"][i])
+            
+            group.scatter.set_sizes(new_sizes)
+            self.fig.canvas.draw_idle() # redraw
+    
     def _create_togglevis_checkboxes(self) -> list[widgets.Checkbox]:
         checkbox_widgets = []
+        
+        dom_cb = widgets.Checkbox(
+            value=True,
+            description="Dominated Models",
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(margin='10px 0')
+        )
+        dom_cb.observe(
+            lambda change: self._toggle_dominated_visibility(change['new']),
+            names='value'
+        )
+        checkbox_widgets.append(dom_cb)
+        
         for group in self.model_plot_groups:
             checkbox = widgets.Checkbox(
                 value=True,
@@ -419,7 +489,7 @@ class GenericGroupPerformanceAnalyzer:
             widgets.HTML("<b>Model Details:</b>"),
             self.info_output,
             widgets.HTML("<b>Show/Hide Groups:</b>"),
-            widgets.VBox(checkboxes)
+            widgets.VBox(checkboxes, layout={"border": "solid 1px #ccc", "overflow": "hidden scroll", "height": "200px"}),
         ], layout={'width': '300px', 'margin': '0 20px'})
         
         # Make the figure canvas wider to accommodate the legend
