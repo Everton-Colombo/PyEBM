@@ -539,13 +539,14 @@ class GenericGroupPerformanceAnalyzer:
             tooltip='Add selected baseline model to models to combine',
             layout=widgets.Layout(width='100%', margin='10px 0')
         )
+        
         # Enable button when baseline model is selected
         def update_button_state(selected_model):
             add_model_btn.disabled = (
                 selected_model["group"] is None or 
                 selected_model["group"].model_type != "baseline"
             )
-    
+        
         self.modelSelected_event.add_listener(update_button_state)
         
         def add_model_to_combine(btn):
@@ -553,7 +554,6 @@ class GenericGroupPerformanceAnalyzer:
             if selected_model is None:
                 return
                 
-            selected_model = selected_model
             selected_group = selected_model["group"]
             selected_index = selected_model["index"]
             
@@ -575,17 +575,58 @@ class GenericGroupPerformanceAnalyzer:
             )
             
             self.generate_plot(False)
-                
+        
         # Add functionality to button
         add_model_btn.on_click(add_model_to_combine)
         
-        # Creating list of models to combine
-        mtc_list = widgets.VBox([
-            widgets.HTML(f"<b>{i}:</b> {label}") for i, label in enumerate(self.models_to_combine[:, 0])
-        ], layout={'height': '200px', 'overflow': "auto", 'border': 'solid 1px #ccc', 'scrollbar-width': 'thin'})
+        # Function to handle model removal
+        def remove_model_from_combine(index):
+            # Get the model info
+            model_label, model_instance = self.models_to_combine[index]
+            
+            # Remove from models_to_combine
+            self.models_to_combine = np.delete(self.models_to_combine, index, axis=0)
+            
+            # Add to baseline_models
+            self.baseline_models = np.append(
+                self.baseline_models, 
+                np.array([(model_label, model_instance)]), 
+                axis=0
+            )
+            
+            # Regenerate plot
+            self.generate_plot(False)
+        
+        # Create widgets for each model in the list
+        model_widgets = []
+        for i, (label, _) in enumerate(self.models_to_combine):
+            # Create remove button
+            remove_btn = widgets.Button(
+                description='✖',  # X symbol
+                tooltip=f'Remove {label} from models to combine',
+                button_style='danger',
+                layout=widgets.Layout(width='35px')
+            )
+            
+            # Add click handler with index captured via closure
+            remove_btn.on_click(lambda btn, idx=i: remove_model_from_combine(idx))
+            
+            # Create row with model name and remove button
+            model_row = widgets.HBox([
+                widgets.HTML(f"<b>{i}:</b> {label}", layout={'flex': '1'}),
+                remove_btn
+            ], layout=widgets.Layout(width='95%', margin='2px 0'))
+            
+            model_widgets.append(model_row)
+        
+        # Pack model widgets into a scrollable container
+        mtc_list = widgets.VBox(
+            model_widgets,
+            layout={'min-height': '50px', 'max-height': '200px', 'overflow': "auto", 
+                    'border': 'solid 1px #ccc', 'scrollbar-width': 'thin'}
+        )
         
         return widgets.VBox([
             mtc_list,
             add_model_btn,
-        ], layout={'border': 'solid 1px #ccc', 'overflow': 'hidden', 'padding': '10px', 'width': '300px'})
-        
+        ], layout={'border': 'solid 1px #ccc', 'overflow': 'hidden', 'padding': '10px', 'max-width': '300px'})
