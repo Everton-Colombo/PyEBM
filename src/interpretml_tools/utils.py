@@ -1,11 +1,11 @@
-
-
-from typing import List
+from typing import List, Dict, Any
 import numpy as np
 from interpret.glassbox._ebm._ebm import EBMModel, ExplainableBoostingClassifier, ExplainableBoostingRegressor
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
+from sklearn.metrics import accuracy_score, r2_score
 
 
-class CombinedEBM:
+class CombinedEBM(BaseEstimator):
     """
     This class combines multiple EBM models into a single model.
     Contrary to interpretML's merge_ebms function, this class performs very few checks,
@@ -13,26 +13,47 @@ class CombinedEBM:
     
     The combination is done by a weighted average of the predictions from each model.
     The feature functions are also combined in a similar way.
+    
+    This class implements the scikit-learn estimator interface.
     """
     
-    def __init__(self, ebms: List[EBMModel], weights):
+    def __init__(self, ebms: List[EBMModel], weights=None):
         self.ebms = ebms
-        self.weights = np.array(weights) / sum(weights)  # Auto-normalize
+        self.weights = weights
+        
+    def fit(self, X=None, y=None):
+        """
+        This method is implemented for scikit-learn compatibility.
+        Since this class combines pre-trained models, it doesn't need actual training.
+        
+        Returns
+        -------
+        self : object
+            Returns self.
+        """
+        weights = self.weights
+        if weights is None:
+            weights = [1.0] * len(self.ebms)
+            
+        self.weights_ = np.array(weights) / sum(weights)  # Auto-normalize
 
-        self.setting = "classification" if hasattr(ebms[0], "predict_proba") else "regression"
+        self.setting_ = "classification" if hasattr(self.ebms[0], "predict_proba") else "regression"
         
         # Copy attributes from the first model
-        self.feature_names_in_ = ebms[0].feature_names_in_
-        self.term_features_ = ebms[0].term_features_
-        self.intercept_ = sum(ebm.intercept_ * w for ebm, w in zip(ebms, self.weights))
+        self.feature_names_in_ = self.ebms[0].feature_names_in_
+        self.term_features_ = self.ebms[0].term_features_
+        self.intercept_ = sum(ebm.intercept_ * w for ebm, w in zip(self.ebms, self.weights_))
         
         # Combine bins, term_scores, and feature_bounds
         self._combine_model_structures()
         
         self._setup_interface()
+        return self
     
     def _setup_interface(self):
-        if self.setting == "classification":
+        if self.setting_ == "classification":
+            self.classes_ = self.ebms[0].classes_
+            self.n_classes_ = len(self.classes_)
             self.predict_proba = self.__predict_proba
             self.predict = self.__predict_classification
         else:
@@ -40,14 +61,75 @@ class CombinedEBM:
     
     def __predict_proba(self, X):
         probas = [ebm.predict_proba(X) * w 
-                for ebm, w in zip(self.ebms, self.weights)]
+                for ebm, w in zip(self.ebms, self.weights_)]
         return np.sum(probas, axis=0)
     
     def __predict_classification(self, X):
         return np.argmax(self.predict_proba(X), axis=1)
 
     def __predict_regression(self, X):
-        return np.sum([ebm.predict(X) * w for ebm, w in zip(self.ebms, self.weights)], axis=0)
+        return np.sum([ebm.predict(X) * w for ebm, w in zip(self.ebms, self.weights_)], axis=0)
+    
+    def score(self, X, y):
+        """
+        Return the mean accuracy on the given test data and labels for classification,
+        or the coefficient of determination R^2 for regression.
+        
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Test samples.
+        y : array-like of shape (n_samples,)
+            True labels for X.
+            
+        Returns
+        -------
+        score : float
+            Mean accuracy or R^2 score
+        """
+        if self.setting_ == "classification":
+            return accuracy_score(y, self.predict(X))
+        else:
+            return r2_score(y, self.predict(X))
+            
+    def get_params(self, deep=True):
+        """
+        Get parameters for this estimator.
+        
+        Parameters
+        ----------
+        deep : bool, default=True
+            If True, will return the parameters for this estimator and
+            contained subobjects that are estimators.
+            
+        Returns
+        -------
+        params : dict
+            Parameter names mapped to their values.
+        """
+        params = {
+            "ebms": self.ebms,
+            "weights": self.weights
+        }
+        return params
+        
+    def set_params(self, **params):
+        """
+        Set the parameters of this estimator.
+        
+        Parameters
+        ----------
+        **params : dict
+            Estimator parameters.
+            
+        Returns
+        -------
+        self : object
+            Estimator instance.
+        """
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
     
     def _combine_model_structures(self):
         """Combine the internal structures of the component EBMs."""
@@ -97,7 +179,7 @@ class CombinedEBM:
         combined_scores = np.zeros(len(combined_bin_dict) + 2)  # +2 for missing and unseen bins
         
         # Add weighted scores from each model
-        for ebm, weight in zip(self.ebms, self.weights):
+        for ebm, weight in zip(self.ebms, self.weights_):
             bin_info = ebm.bins_[feature_idx]
             categories_dict = bin_info[0]
             
@@ -156,7 +238,7 @@ class CombinedEBM:
         combined_scores = np.zeros(len(combined_cuts) + 3)  # +3 for missing, leftmost, and rightmost bins
         
         # Add weighted scores from each model
-        for ebm, weight in zip(self.ebms, self.weights):
+        for ebm, weight in zip(self.ebms, self.weights_):
             bin_info = ebm.bins_[feature_idx]
             cuts = bin_info[0]
             

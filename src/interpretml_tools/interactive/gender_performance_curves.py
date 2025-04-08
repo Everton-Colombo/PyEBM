@@ -88,7 +88,7 @@ class GenericGroupPerformanceAnalyzer:
             model_indexes = list(range(len(self.models_to_combine)))
         
         selected_models = self.models_to_combine[model_indexes, 1]
-        return CombinedEBM(selected_models, weights)
+        return CombinedEBM(selected_models, weights).fit()
         
     def _evaluate_model(self, model) -> dict:
         """Evaluate model using InterpretML's prediction format"""
