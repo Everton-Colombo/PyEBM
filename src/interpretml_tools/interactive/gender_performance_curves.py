@@ -332,6 +332,9 @@ class GenericGroupPerformanceAnalyzer:
             
             # Add annotations for models to combine
             if model_plot_group.id == "tocombine_models":
+                # Initialize an empty list to store annotation objects
+                model_plot_group.additional_group_data["annotations"] = []
+                
                 for i, (x, y) in enumerate(zip(x_values, y_values)):
                     # Get the model instance from the instance_data
                     model_instance = model_plot_group.instances_data[i]["model"]
@@ -340,7 +343,7 @@ class GenericGroupPerformanceAnalyzer:
                     for j, (_, m) in enumerate(self.models_to_combine):
                         if m is model_instance:  # Check if they're the same object
                             # Add annotation with the correct model index
-                            self.ax.annotate(
+                            annot = self.ax.annotate(
                                 str(j),
                                 (x, y),
                                 textcoords="offset points",
@@ -351,6 +354,8 @@ class GenericGroupPerformanceAnalyzer:
                                 bbox=dict(fc='black', alpha=0.5, edgecolor='none'),
                                 color='white'
                             )
+                            # Store the annotation object
+                            model_plot_group.additional_group_data["annotations"].append(annot)
                             break
         
     def generate_plot(self, initial: bool = True):
@@ -438,7 +443,17 @@ class GenericGroupPerformanceAnalyzer:
                         frameon=False, fontsize=9)
     
     def _toggle_group_visibility(self, group: ModelPlotGroup, change):
-        group.scatter.set_visible(change['new'])
+        """Toggle visibility of a model group and its annotations"""
+        visible = change['new']
+        
+        # Toggle scatter plot visibility
+        group.scatter.set_visible(visible)
+        
+        # Toggle annotations visibility if they exist
+        if group.id == "tocombine_models" and "annotations" in group.additional_group_data:
+            for annot in group.additional_group_data["annotations"]:
+                annot.set_visible(visible)
+        
         self.fig.canvas.draw_idle()
     
     def _identify_dominated_models(self):
