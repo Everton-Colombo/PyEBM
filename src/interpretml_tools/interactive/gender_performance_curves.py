@@ -18,6 +18,9 @@ import mplcursors
 from dataclasses import dataclass, field
 
 from .._utils.event import Event
+import dill
+from datetime import datetime
+import os
 
 @dataclass
 class ModelPlotGroup:
@@ -331,7 +334,7 @@ class GenericGroupPerformanceAnalyzer:
             model_plot_group.scatter = scatter
             
             # Add annotations for models to combine
-            if model_plot_group.id == "tocombine_models":
+            if (model_plot_group.id == "tocombine_models"):
                 # Initialize an empty list to store annotation objects
                 model_plot_group.additional_group_data["annotations"] = []
                 
@@ -524,6 +527,15 @@ class GenericGroupPerformanceAnalyzer:
                     display(self._generate_info_html(selected_model["group"], selected_model["instance_data"]))
         self.modelSelected_event.add_listener(update_info_output)
         
+        # Add save button
+        save_button = widgets.Button(
+            description='Save Visible Models',
+            button_style='info',
+            tooltip='Save all visible models to a pickle file',
+            layout=widgets.Layout(width='100%', margin='10px 0')
+        )
+        save_button.on_click(self._save_visible_models)
+        
         # Create the control panel
         control_panel = widgets.VBox([
             widgets.HTML("<b>Model Details:</b>"),
@@ -531,7 +543,9 @@ class GenericGroupPerformanceAnalyzer:
             widgets.HTML("<b>Show/Hide Groups:</b>"),
             self._create_togglevis_checkboxes(),
             widgets.HTML("<b>Models to Combine:</b>"),
-            self._create_mtc_card()
+            self._create_mtc_card(),
+            widgets.HTML("<b>Save Models:</b>"),
+            save_button,
         ], layout={'width': '300px', 'margin': '0 20px'})
         
         # Make the figure canvas wider to accommodate the legend
@@ -542,6 +556,66 @@ class GenericGroupPerformanceAnalyzer:
             control_panel,
             fig_canvas
         ])
+
+    def _save_visible_models(self, btn):
+        """Save all visible models on the plot to a pickle file"""
+        try:
+            # Collect all visible models from the plot
+            visible_models = self._collect_visible_models()
+            
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"visible_models_{timestamp}.pkl"
+            
+            # Save models
+            with open(filename, "wb") as f:
+                dill.dump(visible_models, f)
+            
+            # Show success message
+            with self.display_container:
+                print(f"✅ Successfully saved {len(visible_models)} models to {os.path.abspath(filename)}")
+        except Exception as e:
+            # Show error message
+            with self.display_container:
+                print(f"❌ Error saving models: {str(e)}")
+
+    def _collect_visible_models(self):
+        """Collect all visible models from the plot"""
+        visible_models = []
+        
+        for group in self.model_plot_groups:
+            # Check if group is visible (has visible scatter plot)
+            if not group.scatter.get_visible():
+                continue
+            
+            # For each model in the group
+            for i, instance_data in enumerate(group.instances_data):
+                # Skip if model is hidden (size 0 indicates hidden by dominated filter)
+                sizes = group.scatter.get_sizes()
+                if len(sizes) > 1 and sizes[i] == 0:
+                    continue
+                elif len(sizes) == 1 and sizes[0] == 0:
+                    continue
+
+                # Get metadata for the model
+                model_info = {
+                    "model": instance_data["model"],
+                    "group_type": group.model_type,
+                    "group_label": group.label,
+                    "metrics": instance_data["metrics"],
+                    "label": instance_data.get("label", "")
+                }
+                
+                # Add weights if it's a combined model
+                if "weights" in instance_data:
+                    model_info["weights"] = instance_data["weights"]
+                    
+                    # Add original model labels if it's a combined model
+                    model_info["model_labels"] = [label for label, _ in self.models_to_combine]
+                
+                visible_models.append(model_info)
+        
+        return visible_models
         
     def _create_togglevis_checkboxes(self) -> widgets.VBox:
         checkbox_widgets = []
