@@ -1,6 +1,6 @@
-# EBM Works
+# PyEBM
 
-Welcome to the **EBM Works** repository! This project currently hosts two main components:
+Welcome to the **PyEBM** repository! This project currently hosts two main components:
 
 1. **PyEBM**  
     A Python-based implementation of Explainable Boosting Machines (EBM), designed with flexibility and customization in mind.
